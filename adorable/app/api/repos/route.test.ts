@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => {
       readMetadata: vi.fn(),
     },
     getOrCreateIdentitySession: vi.fn(),
+    getOrCreateUserFreestyleIdentity: vi.fn(),
     listProjectsForUser: vi.fn(),
     projectApplicationService: {
       createProject: vi.fn(),
@@ -50,6 +51,7 @@ vi.mock("@/lib/identity-session", () => ({
 vi.mock("@/lib/product-auth", () => ({
   AuthenticationRequiredError: mocks.AuthenticationRequiredError,
   createOwnedProject: mocks.createOwnedProject,
+  getOrCreateUserFreestyleIdentity: mocks.getOrCreateUserFreestyleIdentity,
   listProjectsForUser: mocks.listProjectsForUser,
   requireCurrentUser: mocks.requireCurrentUser,
   resolveOwnedProjectName: mocks.resolveOwnedProjectName,
@@ -218,13 +220,24 @@ describe("/api/repos", () => {
     expect(mocks.freestyleProjectStore.readMetadata).toHaveBeenCalledTimes(1);
   });
 
-  it("creates the project with the legacy Freestyle identity and persists ownership", async () => {
-    const access = { identityId: "legacy-identity-id" };
+  it("creates the project with the legacy Freestyle identity, prepares persistent grants, and persists ownership", async () => {
+    const legacyAccess = { identityId: "legacy-identity-id" };
+    const userAccess = {
+      identityId: "user-identity-id",
+      grantGitRepoWrite: vi.fn().mockResolvedValue(undefined),
+      grantVmAccess: vi.fn().mockResolvedValue(undefined),
+    };
     const result = {
       id: "wrapper-repo-id",
       metadata: {
         version: 2,
         sourceRepoId: "source-repo-id",
+        vm: {
+          vmId: "vm-id",
+          previewUrl: "https://preview.example.com",
+          devCommandTerminalUrl: "https://terminal.example.com",
+          additionalTerminalsUrl: "https://terminals.example.com",
+        },
         conversations: [],
         deployments: [],
         productionDomain: null,
@@ -241,7 +254,13 @@ describe("/api/repos", () => {
       identityId: "legacy-identity-id",
       identity: { kind: "legacy-identity" },
     });
-    mocks.createFreestyleAccessContext.mockReturnValue(access);
+    mocks.getOrCreateUserFreestyleIdentity.mockResolvedValue({
+      identityId: "user-identity-id",
+      identity: { kind: "user-identity" },
+    });
+    mocks.createFreestyleAccessContext
+      .mockReturnValueOnce(legacyAccess)
+      .mockReturnValueOnce(userAccess);
     mocks.projectApplicationService.createProject.mockResolvedValue(result);
     mocks.resolveOwnedProjectName.mockReturnValue("Project");
 
@@ -266,13 +285,167 @@ describe("/api/repos", () => {
       identityId: "legacy-identity-id",
       identity: { kind: "legacy-identity" },
     });
+    expect(mocks.createFreestyleAccessContext).toHaveBeenCalledWith({
+      identityId: "user-identity-id",
+      identity: { kind: "user-identity" },
+    });
     expect(mocks.projectApplicationService.createProject).toHaveBeenCalledWith(
       {
         requestedName: "Project",
         requestedConversationTitle: "Initial conversation",
         githubRepoName: undefined,
       },
-      { access },
+      { access: legacyAccess },
+    );
+    expect(mocks.getOrCreateUserFreestyleIdentity).toHaveBeenCalledWith({
+      id: "user-id",
+      email: "user@example.com",
+    });
+    expect(
+      mocks.projectApplicationService.createProject.mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      mocks.getOrCreateUserFreestyleIdentity.mock.invocationCallOrder[0],
+    );
+    expect(userAccess.grantGitRepoWrite).toHaveBeenNthCalledWith(
+      1,
+      "source-repo-id",
+    );
+    expect(userAccess.grantGitRepoWrite).toHaveBeenNthCalledWith(
+      2,
+      "wrapper-repo-id",
+    );
+    expect(userAccess.grantVmAccess).toHaveBeenCalledWith("vm-id");
+    expect(
+      userAccess.grantVmAccess.mock.invocationCallOrder[0],
+    ).toBeLessThan(mocks.createOwnedProject.mock.invocationCallOrder[0]);
+    expect(mocks.createOwnedProject).toHaveBeenCalledWith({
+      ownerUserId: "user-id",
+      wrapperRepoId: "wrapper-repo-id",
+      sourceRepoId: "source-repo-id",
+      name: "Project",
+    });
+  });
+
+  it("does not attempt a VM grant for the persistent user identity when vmId is absent", async () => {
+    const legacyAccess = { identityId: "legacy-identity-id" };
+    const userAccess = {
+      identityId: "user-identity-id",
+      grantGitRepoWrite: vi.fn().mockResolvedValue(undefined),
+      grantVmAccess: vi.fn().mockResolvedValue(undefined),
+    };
+    const result = {
+      id: "wrapper-repo-id",
+      metadata: {
+        version: 2,
+        sourceRepoId: "source-repo-id",
+        conversations: [],
+        deployments: [],
+        productionDomain: null,
+        productionDeploymentId: null,
+      },
+      conversationId: "conversation-id",
+    };
+
+    mocks.requireCurrentUser.mockResolvedValue({ id: "user-id" });
+    mocks.getOrCreateIdentitySession.mockResolvedValue({
+      identityId: "legacy-identity-id",
+      identity: { kind: "legacy-identity" },
+    });
+    mocks.getOrCreateUserFreestyleIdentity.mockResolvedValue({
+      identityId: "user-identity-id",
+      identity: { kind: "user-identity" },
+    });
+    mocks.createFreestyleAccessContext
+      .mockReturnValueOnce(legacyAccess)
+      .mockReturnValueOnce(userAccess);
+    mocks.projectApplicationService.createProject.mockResolvedValue(result);
+    mocks.resolveOwnedProjectName.mockReturnValue("Project");
+
+    const { POST } = await import("./route");
+    const response = await POST(
+      new Request("https://adorable.test/api/repos", {
+        method: "POST",
+        body: JSON.stringify({ name: "Project" }),
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(userAccess.grantGitRepoWrite).toHaveBeenCalledTimes(2);
+    expect(userAccess.grantVmAccess).not.toHaveBeenCalled();
+    expect(mocks.createOwnedProject).toHaveBeenCalledWith({
+      ownerUserId: "user-id",
+      wrapperRepoId: "wrapper-repo-id",
+      sourceRepoId: "source-repo-id",
+      name: "Project",
+    });
+  });
+
+  it("logs a persistent grant failure without rolling back the legacy project creation", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+    const grantError = new Error("grant failed");
+    const legacyAccess = { identityId: "legacy-identity-id" };
+    const userAccess = {
+      identityId: "user-identity-id",
+      grantGitRepoWrite: vi.fn().mockRejectedValueOnce(grantError),
+      grantVmAccess: vi.fn().mockResolvedValue(undefined),
+    };
+    const result = {
+      id: "wrapper-repo-id",
+      metadata: {
+        version: 2,
+        sourceRepoId: "source-repo-id",
+        vm: {
+          vmId: "vm-id",
+          previewUrl: "https://preview.example.com",
+          devCommandTerminalUrl: "https://terminal.example.com",
+          additionalTerminalsUrl: "https://terminals.example.com",
+        },
+        conversations: [],
+        deployments: [],
+        productionDomain: null,
+        productionDeploymentId: null,
+      },
+      conversationId: "conversation-id",
+    };
+
+    mocks.requireCurrentUser.mockResolvedValue({ id: "user-id" });
+    mocks.getOrCreateIdentitySession.mockResolvedValue({
+      identityId: "legacy-identity-id",
+      identity: { kind: "legacy-identity" },
+    });
+    mocks.getOrCreateUserFreestyleIdentity.mockResolvedValue({
+      identityId: "user-identity-id",
+      identity: { kind: "user-identity" },
+    });
+    mocks.createFreestyleAccessContext
+      .mockReturnValueOnce(legacyAccess)
+      .mockReturnValueOnce(userAccess);
+    mocks.projectApplicationService.createProject.mockResolvedValue(result);
+    mocks.resolveOwnedProjectName.mockReturnValue("Project");
+
+    const { POST } = await import("./route");
+    const response = await POST(
+      new Request("https://adorable.test/api/repos", {
+        method: "POST",
+        body: JSON.stringify({ name: "Project" }),
+      }),
+    );
+
+    await expect(response.json()).resolves.toEqual({
+      id: "wrapper-repo-id",
+      metadata: result.metadata,
+      conversationId: "conversation-id",
+    });
+    expect(response.status).toBe(200);
+    expect(mocks.projectApplicationService.createProject).toHaveBeenCalledWith(
+      {
+        requestedName: "Project",
+        requestedConversationTitle: undefined,
+        githubRepoName: undefined,
+      },
+      { access: legacyAccess },
     );
     expect(mocks.createOwnedProject).toHaveBeenCalledWith({
       ownerUserId: "user-id",
@@ -280,6 +453,19 @@ describe("/api/repos", () => {
       sourceRepoId: "source-repo-id",
       name: "Project",
     });
+    expect(consoleError).toHaveBeenCalledWith(
+      "Failed to prepare persistent user identity grants",
+      {
+        userId: "user-id",
+        wrapperRepoId: "wrapper-repo-id",
+        sourceRepoId: "source-repo-id",
+        vmId: "vm-id",
+        error: { name: "Error", message: "grant failed" },
+      },
+    );
+    expect(userAccess.grantVmAccess).not.toHaveBeenCalled();
+
+    consoleError.mockRestore();
   });
 
   it("returns a predictable 401 from POST before touching Freestyle when Supabase auth is missing", async () => {
@@ -300,6 +486,7 @@ describe("/api/repos", () => {
     });
     expect(response.status).toBe(401);
     expect(mocks.getOrCreateIdentitySession).not.toHaveBeenCalled();
+    expect(mocks.getOrCreateUserFreestyleIdentity).not.toHaveBeenCalled();
     expect(mocks.projectApplicationService.createProject).not.toHaveBeenCalled();
     expect(mocks.createOwnedProject).not.toHaveBeenCalled();
   });

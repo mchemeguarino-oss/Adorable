@@ -10,6 +10,7 @@ import {
   AuthenticationRequiredError,
   createOwnedProject,
   type CurrentUser,
+  getOrCreateUserFreestyleIdentity,
   listProjectsForUser,
   requireCurrentUser,
   resolveOwnedProjectName,
@@ -197,6 +198,31 @@ export async function POST(req: Request) {
       }),
     },
   );
+
+  try {
+    const userIdentity = await getOrCreateUserFreestyleIdentity(currentUser);
+    const userAccess = createFreestyleAccessContext(userIdentity);
+    await userAccess.grantGitRepoWrite(result.metadata.sourceRepoId);
+    await userAccess.grantGitRepoWrite(result.id);
+
+    const vmId = result.metadata.vm?.vmId;
+    if (vmId) {
+      await userAccess.grantVmAccess(vmId);
+    }
+  } catch (error) {
+    const grantError =
+      error instanceof Error
+        ? { name: error.name, message: error.message }
+        : { message: String(error) };
+
+    console.error("Failed to prepare persistent user identity grants", {
+      userId: currentUser.id,
+      wrapperRepoId: result.id,
+      sourceRepoId: result.metadata.sourceRepoId,
+      vmId: result.metadata.vm?.vmId,
+      error: grantError,
+    });
+  }
 
   await createOwnedProject({
     ownerUserId: currentUser.id,
