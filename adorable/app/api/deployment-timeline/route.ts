@@ -4,6 +4,13 @@ import {
 } from "@/lib/adapters";
 import { createFreestyleAccessContext } from "@/lib/application/access-control-service";
 import { getOrCreateIdentitySession } from "@/lib/identity-session";
+import {
+  assertProjectOwnership,
+  AuthenticationRequiredError,
+  type CurrentUser,
+  ProjectOwnershipRequiredError,
+  requireCurrentUser,
+} from "@/lib/product-auth";
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
@@ -19,6 +26,23 @@ export async function GET(req: Request) {
   }
 
   try {
+    let currentUser: CurrentUser;
+    try {
+      currentUser = await requireCurrentUser();
+      await assertProjectOwnership(currentUser.id, repoId);
+    } catch (error) {
+      if (
+        error instanceof AuthenticationRequiredError ||
+        error instanceof ProjectOwnershipRequiredError
+      ) {
+        return Response.json(
+          { error: error.message },
+          { status: error.status },
+        );
+      }
+      throw error;
+    }
+
     const { identityId, identity } = await getOrCreateIdentitySession();
     const access = createFreestyleAccessContext({
       identityId,

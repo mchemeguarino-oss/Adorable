@@ -9,6 +9,13 @@ import {
 import { createTools as createVmTools } from "@/lib/create-tools";
 import { createFreestyleAccessContext } from "@/lib/application/access-control-service";
 import { getOrCreateIdentitySession } from "@/lib/identity-session";
+import {
+  assertProjectOwnership,
+  AuthenticationRequiredError,
+  type CurrentUser,
+  ProjectOwnershipRequiredError,
+  requireCurrentUser,
+} from "@/lib/product-auth";
 import { SYSTEM_PROMPT } from "@/lib/system-prompt";
 
 export async function POST(req: Request) {
@@ -35,6 +42,23 @@ export async function POST(req: Request) {
       { error: "messages must be an array." },
       { status: 400 },
     );
+  }
+
+  let currentUser: CurrentUser;
+  try {
+    currentUser = await requireCurrentUser();
+    await assertProjectOwnership(currentUser.id, repoId);
+  } catch (error) {
+    if (
+      error instanceof AuthenticationRequiredError ||
+      error instanceof ProjectOwnershipRequiredError
+    ) {
+      return Response.json(
+        { error: error.message },
+        { status: error.status },
+      );
+    }
+    throw error;
   }
 
   const { identityId, identity } = await getOrCreateIdentitySession();
