@@ -3,6 +3,7 @@ import { RepoWelcome } from "@/components/assistant-ui/repo-welcome";
 import { freestyleConversationStore } from "@/lib/adapters";
 import { createFreestyleAccessContext } from "@/lib/application/access-control-service";
 import { getOrCreateIdentitySession } from "@/lib/identity-session";
+import { getCurrentUser, hasProjectOwnership } from "@/lib/product-auth";
 
 const hasRepoAccess = async (repoId: string) => {
   const { identityId, identity } = await getOrCreateIdentitySession();
@@ -19,8 +20,13 @@ export default async function ConversationPage({
   params: Promise<{ repoId: string; conversationId: string }>;
 }) {
   const { repoId, conversationId } = await params;
+  const currentUser = await getCurrentUser();
 
-  if (!(await hasRepoAccess(repoId))) {
+  if (
+    !currentUser ||
+    !(await hasProjectOwnership(currentUser.id, repoId)) ||
+    !(await hasRepoAccess(repoId))
+  ) {
     return (
       <Assistant
         initialMessages={[]}

@@ -6,6 +6,13 @@ import {
   normalizeProductionDomain,
 } from "@/lib/application/production-domain";
 import { getOrCreateIdentitySession } from "@/lib/identity-session";
+import {
+  assertProjectOwnership,
+  AuthenticationRequiredError,
+  type CurrentUser,
+  ProjectOwnershipRequiredError,
+  requireCurrentUser,
+} from "@/lib/product-auth";
 
 const assertRepoAccess = async (repoId: string) => {
   const { identityId, identity } = await getOrCreateIdentitySession();
@@ -16,11 +23,33 @@ const assertRepoAccess = async (repoId: string) => {
   return access.hasGitRepoAccess(repoId);
 };
 
+const assertProductProjectAccess = async (repoId: string) => {
+  let currentUser: CurrentUser;
+  try {
+    currentUser = await requireCurrentUser();
+    await assertProjectOwnership(currentUser.id, repoId);
+  } catch (error) {
+    if (
+      error instanceof AuthenticationRequiredError ||
+      error instanceof ProjectOwnershipRequiredError
+    ) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: error.status },
+      );
+    }
+    throw error;
+  }
+};
+
 export async function POST(
   req: Request,
   { params }: { params: Promise<{ repoId: string }> },
 ) {
   const { repoId } = await params;
+
+  const productAccessError = await assertProductProjectAccess(repoId);
+  if (productAccessError) return productAccessError;
 
   if (!(await assertRepoAccess(repoId))) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
